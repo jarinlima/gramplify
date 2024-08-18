@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+
+import os
+import random
+import sys
+import threading
+import itertools
+import time
+import termios
+import tty
+from openai import OpenAI
+from pydantic import BaseModel, Field
+import select
+
+class ExerciseItem(BaseModel):
+    prompt: str = Field(description="The prompt for the individual exercise")
+    student_answer: str = Field(description="The student's answer to the exercise")
+
+class ExerciseSet(BaseModel):
+    instructions: str = Field(description="Instructions for the exercise set")
+    items: list[ExerciseItem] = Field(description="List of individual exercise items")
+
+class Module(BaseModel):
+    exercise_sets: list[ExerciseSet] = Field(description="List of exercise sets for the module")
+
+class ExerciseItemEvaluation(BaseModel):
+    item: ExerciseItem
+    score: float = Field(description="Score for the individual exercise item [0-100]")
+    feedback: str
+
+class ExerciseSetEvaluation(BaseModel):
+    set: ExerciseSet
+    evaluated_items: list[ExerciseItemEvaluation] = Field(description="List of evaluated exercise items")
+    average_score: float = Field(description="Average score for the exercise set")
+    feedback: str
+
+class Rules(BaseModel):
+    rule: str = Field(description="Something the student should have known about the topic to answer the questions correctly, such as grammar rules, facts, etc. all related to the topic")
+
+class ModuleEvaluation(BaseModel):
+    evaluated_sets: list[ExerciseSetEvaluation] = Field(description="List of evaluated exercise sets")
+    total_score: float = Field(description="Average score for the entire module")
+    feedback: str
+    rules: list[Rules] = Field(description="The most important thigs that the student should have known to answer the questions correctly")
+
+def generate_random_id():
+    return f"{random.randint(0, 9999999999):010}"
+
+def disable_input():
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    return old_settings
+
+def enable_input(old_settings):
+    fd = sys.stdin.fileno()
+    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+def flush_input_buffer():
+    """Flushes any buffered input."""
+    while select.select([sys.stdin], [], [], 0)[0]:
+        sys.stdin.read(1)
+
+def clear_spinner_line():
+    sys.stdout.write('\r' + ' ' * 20 + '\r')  # Clear the spinner line
+    sys.stdout.flush()
+
+def spinner_animation(stop_event):
+    for c in itertools.cycle(['|', '/', '-', '\\']):
+        if stop_event.is_set():
+            break
+        sys.stdout.write(f'\rLoading {c}')
+        sys.stdout.flush()
+        time.sleep(0.1)
+    clear_spinner_line()  # Ensure the line is cleared after stopping
+
+def check_and_evaluate_module_answers(client, module):
+    stop_spinner = threading.Event()
+    spinner_thread = threading.Thread(target=spinner_animation, args=(stop_spinner,))
+    
+    # Disable user input while loading
+    old_settings = disable_input()
+    flush_input_buffer()  # Flush any buffered input before starting the spinner
+    spinner_thread.start()
+
+    try:
+        messages = [
+            {"role": "system", "content": (
+                "You are a helpful assistant that evaluates English practice exercises. "
+                "Your task is to assess the student's responses while keeping the original exercise instructions in mind. "
+                "Please be precise when assessing the answers and make sure your feedback is clear, constructive, and directly addresses the original instructions. "
+                "Do not change or misinterpret the exercise instructions. Instead, use the exact instructions provided when offering feedback."
+                "If the student's answer contains minor typos not related with the exercise content, consider it correct if the meaning is preserved."
+            )},
+            {"role": "user", "content": "This is the module that already includes student answers:\n" + module}
+        ]
+
+        response = client.beta.chat.completions.parse(
+            model="gpt-4o-2024-08-06",
+            messages=messages,
+            response_format=ModuleEvaluation
+        )
+
+        stop_spinner.set()
+        spinner_thread.join()
+
+        clear_spinner_line()  # Ensure the spinner line is cleared
+
+        total_score = response.choices[0].message.parsed.total_score
+        feedback = response.choices[0].message.parsed.feedback
+        print("\n=== Module Feedback ===")
+        for evaluated_set in response.choices[0].message.parsed.evaluated_sets:
+            print(f"\n=== Instructions: {evaluated_set.set.instructions} ===\n")
+            for evaluated_item in evaluated_set.evaluated_items:
+                print(f"• Prompt: {evaluated_item.item.prompt}")
+                print(f"  Student Answer: {evaluated_item.item.student_answer}")
+                print(f"  Score: {evaluated_item.score}")
+                print(f"  Feedback: {evaluated_item.feedback}\n")
+            print(f"--- Average Score for this Exercise Set: {evaluated_set.average_score} ---\n")
+        print(f"\n=== Total Score for the Module: {total_score} ===")
+        print(f"Module Feedback: {feedback}\n")
+        print(f"Things to remember:\n")
+        for rule in response.choices[0].message.parsed.rules:
+            print(f"• {rule.rule}")
+
+    except Exception as e:
+        stop_spinner.set()
+        spinner_thread.join()
+        clear_spinner_line()
+        print(f"Error evaluating module: {e}")
+    finally:
+        # Re-enable user input after loading is done
+        enable_input(old_settings)
+        flush_input_buffer()  # Flush any remaining input after re-enabling
+
+def generate_module(client, topic):
+    stop_spinner = threading.Event()
+    spinner_thread = threading.Thread(target=spinner_animation, args=(stop_spinner,))
+    
+    # Disable user input while loading
+    old_settings = disable_input()
+    flush_input_buffer()  # Flush any buffered input before starting the spinner
+    spinner_thread.start()
+
+    try:
+        random_id = generate_random_id()
+        prompt = (
+            f"Create a module with a list of exercise sets for practicing English on the topic: {topic}. "
+            "Each exercise set should be clearly labeled with instructions and should cover key aspects of the topic. "
+            f"Use this seed: {random_id} to ensure that the exercises are unique each time. "
+            "Ensure a variety of exercises, such as sentence completions, transformations, and fill-in-the-blank questions, that align with the given topic."
+            "Use varied vocabulary, different expressions, and alternative sentence structures across the exercises to ensure diversity. "
+        )
+
+        messages = [
+            {"role": "system", "content": (
+                "You are a helpful assistant that generates English practice exercises. "
+                "The exercises must align with the given topic, and the exercises should include a variety of formats like sentence completions, transformations, and fill-in-the-blank questions."
+            )},
+            {"role": "user", "content": prompt}
+        ]
+
+        response = client.beta.chat.completions.parse(
+            model="gpt-4o-2024-08-06",
+            messages=messages,
+            response_format=Module,
+            temperature=1.1,
+            top_p=1
+        )
+
+        stop_spinner.set()
+        spinner_thread.join()
+
+        clear_spinner_line()  # Ensure the spinner line is cleared
+
+        module = response.choices[0].message.parsed.exercise_sets
+        return module
+    except Exception as e:
+        stop_spinner.set()
+        spinner_thread.join()
+        clear_spinner_line()
+        print(f"Error generating module: {e}")
+        return []
+    finally:
+        # Re-enable user input after loading is done
+        enable_input(old_settings)
+        flush_input_buffer()  # Flush any remaining input after re-enabling
+
+def main():
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("Error: OPENAI_API_KEY environment variable not set.")
+        exit(1)
+    client = OpenAI(api_key=api_key)
+
+    topic = None
+    if "--topic" in sys.argv:
+        topic_index = sys.argv.index("--topic") + 1
+        topic = " ".join(sys.argv[topic_index:])
+
+    while True:
+        if not topic:
+            topic = input("Choose a topic for your English practice (e.g., grammar, vocabulary, conversation): ").strip()
+
+        module = generate_module(client, topic)
+        if not module:
+            print("No exercises were generated. Please try again.")
+            continue
+
+        module_with_answers = ""
+        for exercise_set in module:
+            print(f"\nInstructions: {exercise_set.instructions}\n")
+            module_with_answers += f"\nInstructions: {exercise_set.instructions}\n\n"
+            for i, item in enumerate(exercise_set.items):
+                answer = input(f"{i+1}. {item.prompt}\n>> ").strip()
+                module_with_answers += f"{i+1}. {item.prompt}\nStudent answer: {answer}\n"
+
+        check_and_evaluate_module_answers(client, module_with_answers)
+
+        choice = input("\nWould you like to:\n(1) Generate another set of exercises on the same topic.\n(2) Choose another topic.\n(3) Exit\n>> ").strip()
+        while choice not in ["1", "2", "3"]:
+            choice = input("Invalid choice. Please enter 1, 2, or 3: ").strip()
+        if choice == "1":
+            continue
+        elif choice == "2":
+            topic = input("Enter the new topic: ").strip()
+        elif choice == "3":
+            break
+
+if __name__ == "__main__":
+    main()
