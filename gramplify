@@ -11,6 +11,20 @@ import tty
 from openai import OpenAI
 from pydantic import BaseModel, Field
 import select
+from wordfreq import top_n_list
+
+# Hardcoded CEFR level for word generation
+CEFR_LEVEL = "C1"
+
+# Approximate frequency ranks for each CEFR level
+level_mapping = {
+    "A1": 5000,
+    "A2": 10000,
+    "B1": 20000,
+    "B2": 30000,
+    "C1": 40000,
+    "C2": 50000
+}
 
 class ExerciseItem(BaseModel):
     prompt: str = Field(description="The prompt for the individual exercise")
@@ -42,6 +56,13 @@ class ModuleEvaluation(BaseModel):
     total_score: float = Field(description="Average score for the entire module")
     feedback: str
     rules: list[Rules] = Field(description="The most important thigs that the student should have known to answer the questions correctly")
+
+def get_random_words(level, count=5):
+    if level not in level_mapping:
+        raise ValueError("Invalid level. Choose from A1, A2, B1, B2, C1, C2.")
+    
+    words = top_n_list('en', level_mapping[level])
+    return random.sample(words, count)
 
 def generate_random_id():
     return f"{random.randint(0, 9999999999):010}"
@@ -144,12 +165,17 @@ def generate_module(client, topic):
 
     try:
         random_id = generate_random_id()
+        random_words = get_random_words(CEFR_LEVEL, count=5)
+        random_words_str = ", ".join(random_words)
+        print(f"Generating exercises for the topic: {topic} with the words: {random_words_str}...")
         prompt = (
             f"Create a module with a list of exercise sets for practicing English on the topic: {topic}. "
+            f"Include these five words somewhere in the exercises to add variety (they can be modified or adjusted as needed, but their use is not mandatory): {random_words_str}. "
             "Each exercise set should be clearly labeled with instructions and should cover key aspects of the topic. "
             f"Use this seed: {random_id} to ensure that the exercises are unique each time. "
-            "Ensure a variety of exercises, such as sentence completions, transformations, and fill-in-the-blank questions, that align with the given topic."
-            "Use varied vocabulary, different expressions, and alternative sentence structures across the exercises to ensure diversity. "
+            "Ensure a variety of exercises, such as sentence completions, transformations, and fill-in-the-blank questions, or other activities, that align with the given topic. "
+            "While the provided words add variety, feel free to include other relevant words or expressions that best suit the exercise and topic. "
+            "The focus should be on creating diverse and effective exercises that help the student improve their English skills."
         )
 
         messages = [
