@@ -167,7 +167,6 @@ def generate_module(client, topic):
         random_id = generate_random_id()
         random_words = get_random_words(CEFR_LEVEL, count=5)
         random_words_str = ", ".join(random_words)
-        print(f"Generating exercises for the topic: {topic} with the words: {random_words_str}...")
         prompt = (
             f"Create a module with a list of exercise sets for practicing English on the topic: {topic}. "
             f"Include these five words somewhere in the exercises to add variety (they can be modified or adjusted as needed, but their use is not mandatory): {random_words_str}. "
